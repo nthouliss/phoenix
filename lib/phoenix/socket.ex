@@ -456,10 +456,12 @@ defmodule Phoenix.Socket do
         case drainer do
           {module, function, arguments} ->
             apply(module, function, arguments)
+
           _ ->
             drainer
         end
-        {Phoenix.Socket.PoolDrainer, {endpoint, handler, drainer}}
+
+      {Phoenix.Socket.PoolDrainer, {endpoint, handler, drainer}}
     else
       :ignore
     end
@@ -510,6 +512,7 @@ defmodule Phoenix.Socket do
 
   def __init__({state, %{id: id, endpoint: endpoint} = socket}) do
     _ = id && endpoint.subscribe(id, link: true)
+    schedule_ping()
     {:ok, {state, %{socket | transport_pid: self()}}}
   end
 
@@ -549,6 +552,18 @@ defmodule Phoenix.Socket do
   def __info__(:garbage_collect, state) do
     :erlang.garbage_collect(self())
     {:ok, state}
+  end
+
+  def __info__(:heartbeat, state) do
+    message = %Message{
+      topic: "phoenix",
+      event: "heartbeat",
+      payload: %{}
+    }
+
+    socket = elem(state, 1)
+
+    {:push, encode_reply(socket, message), state}
   end
 
   def __info__(_, state) do
@@ -644,14 +659,9 @@ defmodule Phoenix.Socket do
   end
 
   defp handle_in(_, %{ref: ref, topic: "phoenix", event: "heartbeat"}, state, socket) do
-    reply = %Reply{
-      ref: ref,
-      topic: "phoenix",
-      status: :ok,
-      payload: %{}
-    }
+    schedule_ping()
 
-    {:reply, :ok, encode_reply(socket, reply), {state, socket}}
+    {:ok, {state, socket}}
   end
 
   defp handle_in(
@@ -832,5 +842,10 @@ defmodule Phoenix.Socket do
   defp update_channel_status(state, pid, topic, status) do
     new_channels = Map.update!(state.channels, topic, fn {^pid, ref, _} -> {pid, ref, status} end)
     %{state | channels: new_channels}
+  end
+
+  defp schedule_ping() do
+    Logger.debug("scheduling heartbeat")
+    heartbeat_ref = Process.send_after(self(), :heartbeat, 20_000)
   end
 end

@@ -5,8 +5,7 @@ import {
   DEFAULT_TIMEOUT,
   DEFAULT_VSN,
   SOCKET_STATES,
-  TRANSPORTS,
-  WS_CLOSE_NORMAL
+  TRANSPORTS
 } from "./constants"
 
 import {
@@ -45,7 +44,6 @@ import Timer from "./timer"
  * @param {number} [opts.timeout] - The default timeout in milliseconds to trigger push timeouts.
  *
  * Defaults `DEFAULT_TIMEOUT`
- * @param {number} [opts.heartbeatIntervalMs] - The millisec interval to send a heartbeat message
  * @param {number} [opts.reconnectAfterMs] - The optional function that returns the millisec
  * socket reconnect interval.
  *
@@ -123,7 +121,6 @@ export default class Socket {
         }
       })
     }
-    this.heartbeatIntervalMs = opts.heartbeatIntervalMs || 30000
     this.rejoinAfterMs = (tries) => {
       if(opts.rejoinAfterMs){
         return opts.rejoinAfterMs(tries)
@@ -143,9 +140,6 @@ export default class Socket {
     this.params = closure(opts.params || {})
     this.endPoint = `${endPoint}/${TRANSPORTS.websocket}`
     this.vsn = opts.vsn || DEFAULT_VSN
-    this.heartbeatTimeoutTimer = null
-    this.heartbeatTimer = null
-    this.pendingHeartbeatRef = null
     this.reconnectTimer = new Timer(() => {
       this.teardown(() => this.connect())
     }, this.reconnectAfterMs)
@@ -296,33 +290,8 @@ export default class Socket {
   }
 
   /**
-   * Pings the server and invokes the callback with the RTT in milliseconds
-   * @param {Function} callback
-   *
-   * Returns true if the ping was pushed or false if unable to be pushed.
-   */
-  ping(callback){
-    if(!this.isConnected()){ return false }
-    let ref = this.makeRef()
-    let startTime = Date.now()
-    this.push({topic: "phoenix", event: "heartbeat", payload: {}, ref: ref})
-    let onMsgRef = this.onMessage(msg => {
-      if(msg.ref === ref){
-        this.off([onMsgRef])
-        callback(Date.now() - startTime)
-      }
-    })
-    return true
-  }
-
-  /**
    * @private
    */
-
-  clearHeartbeats(){
-    clearTimeout(this.heartbeatTimer)
-    clearTimeout(this.heartbeatTimeoutTimer)
-  }
 
   onConnOpen(){
     if(this.hasLogger()) this.log("transport", `connected to ${this.endPointURL()}`)
@@ -330,30 +299,12 @@ export default class Socket {
     this.establishedConnections++
     this.flushSendBuffer()
     this.reconnectTimer.reset()
-    this.resetHeartbeat()
     this.stateChangeCallbacks.open.forEach(([, callback]) => callback())
   }
 
   /**
    * @private
    */
-
-  heartbeatTimeout(){
-    if(this.pendingHeartbeatRef){
-      this.pendingHeartbeatRef = null
-      if(this.hasLogger()){ this.log("transport", "heartbeat timeout. Attempting to re-establish connection") }
-      this.triggerChanError()
-      this.closeWasClean = false
-      this.teardown(() => this.reconnectTimer.scheduleTimeout(), WS_CLOSE_NORMAL, "heartbeat timeout")
-    }
-  }
-
-  resetHeartbeat(){
-    if(this.conn && this.conn.skipHeartbeat){ return }
-    this.pendingHeartbeatRef = null
-    this.clearHeartbeats()
-    this.heartbeatTimer = setTimeout(() => this.sendHeartbeat(), this.heartbeatIntervalMs)
-  }
 
   teardown(callback, code, reason){
     if(!this.conn){
@@ -405,7 +356,6 @@ export default class Socket {
     let closeCode = event && event.code
     if(this.hasLogger()) this.log("transport", "close", event)
     this.triggerChanError()
-    this.clearHeartbeats()
     if(!this.closeWasClean && closeCode !== 1000){
       this.reconnectTimer.scheduleTimeout()
     }
@@ -520,10 +470,8 @@ export default class Socket {
   }
 
   sendHeartbeat(){
-    if(this.pendingHeartbeatRef && !this.isConnected()){ return }
-    this.pendingHeartbeatRef = this.makeRef()
-    this.push({topic: "phoenix", event: "heartbeat", payload: {}, ref: this.pendingHeartbeatRef})
-    this.heartbeatTimeoutTimer = setTimeout(() => this.heartbeatTimeout(), this.heartbeatIntervalMs)
+    if(!this.isConnected()){ return }
+    this.push({topic: "phoenix", event: "heartbeat", payload: {}, ref: null})
   }
 
   flushSendBuffer(){
@@ -536,10 +484,8 @@ export default class Socket {
   onConnMessage(rawMessage){
     this.decode(rawMessage.data, msg => {
       let {topic, event, payload, ref, join_ref} = msg
-      if(ref && ref === this.pendingHeartbeatRef){
-        this.clearHeartbeats()
-        this.pendingHeartbeatRef = null
-        this.heartbeatTimer = setTimeout(() => this.sendHeartbeat(), this.heartbeatIntervalMs)
+      if(topic === "phoenix" && event === "heartbeat") {
+        this.sendHeartbeat();
       }
 
       if(this.hasLogger()) this.log("receive", `${payload.status || ""} ${topic} ${event} ${ref && "(" + ref + ")" || ""}`, payload)
